@@ -1,53 +1,69 @@
 import glob
 import os
-import shutil
 import sys
-import time
-
-from threading import Thread
+import copy
 
 import gradio as gr
 import torch
 
 from modules import shared, script_callbacks
-from modules.paths import models_path
 
-from toolkit import *
-
-MODEL_SAVE_PATH = shared.cmd_opts.ckpt_dir or os.path.join(models_path, "Stable-diffusion")
-AUTOPRUNE_PATH = os.path.join(models_path, "Autoprune")
-AUTOPRUNE_FAILED_PATH = os.path.join(AUTOPRUNE_PATH, "Failed")
-COMPONENT_SAVE_PATH = os.path.join(models_path, "Components")
-VAE_SAVE_PATH = shared.cmd_opts.vae_dir or os.path.join(models_path, "VAE")
+from constants import (ARCHITECTURES, AUTOPRUNE_PATH, COMPONENTS, COMPONENT_EXT, COMPONENT_SAVE_PATH,
+                       IDENTIFICATION, LOAD_PATHS, METADATA, MODEL_EXT, MODEL_SAVE_PATH, VAE_SAVE_PATH)
+from toolkit import (build_fake_model, contains_component, find_components, delete_class, extract_component,
+                     fix_model, fix_ema, get_allowed_keys, inspect_model, load, load_components, prune_model,
+                     save, tensor_size, tensor_shape, replace_component, resolve_class)
 
 os.makedirs(AUTOPRUNE_PATH, exist_ok=True)
-
-LOAD_PATHS = [
-    os.path.join(models_path, "Stable-diffusion"),
-    os.path.join(models_path, "Components"),
-    os.path.join(models_path, "VAE"),
-    os.path.join(models_path, "Lora"),
-]
-if shared.cmd_opts.ckpt_dir:
-    LOAD_PATHS += [shared.cmd_opts.ckpt_dir]
-if shared.cmd_opts.vae_dir:
-    LOAD_PATHS += [shared.cmd_opts.vae_dir]
-
-MODEL_EXT = [".ckpt", ".pt", ".pth", ".safetensors"]
-COMPONENT_EXT = {
-    "UNET-v1": ".unet.pt",
-    "EMA-UNET-v1": ".unet.pt",
-    "UNET-v2": ".unet-v2.pt",
-    "UNET-v2-Depth": ".unet-v2-d.pt",
-    "VAE-v1": ".vae.pt",
-    "CLIP-v1": ".clip.pt",
-    "CLIP-v2": ".clip-v2.pt",
-    "Depth-v2": ".depth.pt"
-}
-
 os.makedirs(COMPONENT_SAVE_PATH, exist_ok=True)
 
+
 class ToolkitModel():
+    """
+    ToolkitModel represents a model in the toolkit. 
+
+    This class is used to encapsulate and manage properties related to the model, 
+    including its filename, the model itself, and its metadata. It also keeps track 
+    of whether the model is partially loaded, if it needs to be fixed, as well as 
+    the status of its architecture, such as whether it's broken or has been renamed.
+
+    The class further records the state of components in the architecture, such as 
+    its potential components, the type of the architecture, the classes, and the 
+    components in it.
+
+    Also, it tracks the model's states, like the UNet, VAE, and CLIP modules.
+
+    Lastly, the class also handles information about the total number of parameters 
+    in the model, as well as parameters that are wasted, parameters considered junk, 
+    parameters in the exponential moving average (EMA), and keys for junk and EMA.
+
+    Attributes:
+    - filename (str): File name of the model.
+    - model (dict): The model itself.
+    - metadata (dict): Metadata related to the model.
+    - partial (bool): Flag indicating if the model is partially loaded.
+    - fix_clip (bool): Flag indicating if the model's CLIP needs to be fixed.
+    - broken (list): List of broken components.
+    - renamed (list): List of renamed components.
+    - a_found (dict): Found architecture.
+    - a_rejected (dict): Rejected architecture.
+    - a_resolved (dict): Resolved architecture.
+    - a_potential (list): Potential architectures.
+    - a_type (str): Type of the architecture.
+    - a_classes (dict): Classes in the architecture.
+    - a_components (list): Components in the architecture.
+    - m_str (str): Model string (default is "----/----/----").
+    - m_unet (any): UNet module in the model.
+    - m_vae (any): VAE module in the model.
+    - m_clip (any): CLIP module in the model.
+    - z_total (int): Total number of parameters.
+    - z_waste (int): Wasted parameters.
+    - z_junk (int): Junk parameters.
+    - z_ema (int): EMA parameters.
+    - k_junk (list): Keys of junk parameters.
+    - k_ema (list): Keys of EMA parameters.
+    """
+
     def __init__(self):
         self.filename = ""
         self.model = {}
@@ -80,7 +96,21 @@ class ToolkitModel():
         self.k_junk = []
         self.k_ema = []
 
+
 def do_analysis(model):
+    """
+    Perform analysis on a given model. The analysis includes model inspection, 
+    architecture resolution, metric computation, and size computation of different 
+    components of the model. The analysis results are stored in a ToolkitModel 
+    object and returned.
+
+    Args:
+    model (obj): The model object to be analyzed. This should be a pre-loaded model
+                 object that provides access to model parameters.
+
+    Returns:
+    ToolkitModel: Object containing the analysis results.
+    """
     tm = ToolkitModel()
     tm.model = model
 
@@ -121,7 +151,19 @@ def do_analysis(model):
 
     return tm
 
+
 def get_size(bytes):
+    """
+    Convert a given size in bytes to a human-readable string. Sizes are 
+    displayed in appropriate units: Bytes, KB, MB, or GB, with two decimal 
+    places of precision for KB, MB, and GB.
+
+    Args:
+    bytes (int): Size in bytes.
+
+    Returns:
+    str: String representing the size in a human-readable format.
+    """
     KB = 1024
     MB = KB * 1024
     GB = MB * 1024
@@ -134,7 +176,22 @@ def get_size(bytes):
         return f"{bytes/MB:.2f} MB"
     return f"{bytes/GB:.2f} GB"
 
+
 def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
+    """
+    Generates a basic report about the provided model.
+
+    Args:
+        details (ToolkitModel): An object that contains various statistics and details about the model.
+        dont_half (bool): If true, prevents the function from reporting about precision waste in the model.
+        keep_ema (bool): If true, the function will include Exponential Moving Average (EMA) data in the report.
+
+    Returns:
+        str: A string report containing various details about the model. The report includes total model size, 
+            identified model type, model components, presence of junk data, EMA data, precision waste, potential issues 
+            with the CLIP component, and information about the VAE and CLIP used. It also provides information on potential 
+            changes required for the model.
+    """
     d = details
 
     report = f"### Report ({d.m_str})\n-----\n"
@@ -146,7 +203,8 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
     out = [f"Model is **{get_size(d.z_total)}**."]
 
     if len(d.a_potential) > 1:
-        out += [f"Multiple model types identified: **{', '.join(d.a_potential)}**."]
+        out += [
+            f"Multiple model types identified: **{', '.join(d.a_potential)}**."]
         out += [f"Model type **{d.a_type}** will be used."]
     else:
         out += [f"Model type identified as **{d.a_type}**."]
@@ -154,7 +212,7 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
     if d.a_components:
         out += [f"Model components are: **{', '.join(d.a_components)}**."]
     else:
-        out += [f"**Model has no components**."]
+        out += ["**Model has no components**."]
 
     report += " ".join(out) + "\n\n"
     out = []
@@ -171,7 +229,7 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
         else:
             out += [f"**Contains {len(k_junk)} junk keys!**"]
     else:
-        out += [f"Contains no junk data."]
+        out += ["Contains no junk data."]
 
     if keep_ema:
         if d.k_ema:
@@ -180,7 +238,7 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
             else:
                 out += [f"**Contains {len(d.k_ema)} EMA keys!**"]
         else:
-            out += [f"Contains no EMA data."]
+            out += ["Contains no EMA data."]
 
     if d.z_waste > 0:
         out += [f"Wastes **{get_size(d.z_waste)}** on precision."]
@@ -189,9 +247,11 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
         out += [f"**CLIP was mislablled, {len(d.renamed)} keys renamed.**"]
     if d.broken:
         if d.fix_clip:
-            out += [f"**CLIP had incorrect positions, fixed:** {', '.join([str(i) for i in d.broken])}."]
+            out += [
+                f"**CLIP had incorrect positions, fixed:** {', '.join([str(i) for i in d.broken])}."]
         else:
-            out += [f"**CLIP has incorrect positions, missing:** {', '.join([str(i) for i in d.broken])}."]
+            out += [
+                f"**CLIP has incorrect positions, missing:** {', '.join([str(i) for i in d.broken])}."]
     if "CLIP-v2-WD" in d.a_components:
         out += ["**CLIP is missing its final layer.**"]
 
@@ -232,12 +292,26 @@ def do_basic_report(details: ToolkitModel, dont_half, keep_ema):
     if changed:
         report += f"Model will be fixed (**{changes}** changes)."
     if not changed and not pruned:
-        report += f"**Model is unaltered, nothing to be done.**"
+        report += "**Model is unaltered, nothing to be done.**"
 
     return report
 
 
 def do_adv_report(details: ToolkitModel, abbreviate=True):
+    """
+    Generates an advanced report about the provided model.
+
+    Args:
+        details (ToolkitModel): An object that contains various statistics and details about the model.
+        abbreviate (bool): If True, the function will abbreviate the report for certain sections
+                           if they contain too many elements.
+
+    Returns:
+        str: A string report that contains various details about the model. The report includes statistics 
+            such as the total number of keys, the count of useless and unknown keys, the architecture(s) identified,
+            and the rejected architecture(s) with reasons. It also lists unknown keys in the model.
+            Sections with many elements can be abbreviated to maintain readability.
+    """
     d = details
 
     model_keys = set((k, tensor_shape(k, d.model[k])) for k in d.model.keys())
@@ -259,7 +333,7 @@ def do_adv_report(details: ToolkitModel, abbreviate=True):
             unknown_size += z
 
     report = f"### Report ({d.m_str})\n-----\n"
-    report += f"#### Statistics\n"
+    report += "#### Statistics\n"
     line = [f"Total keys: **{len(model_keys)} ({get_size(model_size)})**"]
     if useless_keys:
         line += [f"Useless keys: **{len(useless_keys)} ({get_size(useless_size)})**"]
@@ -283,9 +357,9 @@ def do_adv_report(details: ToolkitModel, abbreviate=True):
                 for comp in data[clss]:
                     report += f"    - {comp}\n"
                 if not data[clss]:
-                    report += f"    - NONE\n"
+                    report += "    - NONE\n"
             if len(archs) > 1 and arch == d.a_type:
-                report += f"#### Additional\n"
+                report += "#### Additional\n"
     else:
         report += "- *NONE*\n"
 
@@ -304,8 +378,7 @@ def do_adv_report(details: ToolkitModel, abbreviate=True):
                     else:
                         report += f"  - {k}\n"
                 if will_abbreviate:
-                    report += f"  - ...\n"
-
+                    report += "  - ...\n"
 
     if unknown_keys:
         report += "#### Unknown\n"
@@ -317,16 +390,28 @@ def do_adv_report(details: ToolkitModel, abbreviate=True):
         for k, z in data:
             report += f" - {k} {z}\n"
         if will_abbreviate:
-            report += f" - ...\n"
+            report += " - ...\n"
 
     return report
+
 
 source_list = []
 name_list = []
 file_list = []
 loaded = None
 
+
 def get_models(dir):
+    """
+    Retrieve all model files from a specified directory and its subdirectories. 
+    The model file extensions are defined in the constant MODEL_EXT.
+
+    Args:
+    dir (str): The directory to search for model files.
+
+    Returns:
+    list: List of absolute paths to the model files found.
+    """
     ext = ["**" + os.sep + "*" + e for e in MODEL_EXT]
     files = []
     for e in ext:
@@ -334,7 +419,14 @@ def get_models(dir):
             files += [os.path.abspath(file)]
     return files
 
+
 def get_lists():
+    """
+    Prepare global lists of model files and their names from multiple 
+    predefined paths (LOAD_PATHS). The lists are sorted alphabetically. 
+    Also prepares a list of source names, which includes model names and 
+    architecture names.
+    """
     global source_list, file_list, name_list
     file_list = []
     for path in LOAD_PATHS:
@@ -342,9 +434,11 @@ def get_lists():
     file_list = list(set(file_list))
 
     name_list = [p[p.rfind(os.sep)+1:] for p in file_list]
-    name_list = [n if name_list.count(n) == 1 else file_list[i] for i, n in enumerate(name_list)]
+    name_list = [n if name_list.count(
+        n) == 1 else file_list[i] for i, n in enumerate(name_list)]
 
-    file_list = sorted(file_list, key=lambda x: name_list[file_list.index(x)].lower())
+    file_list = sorted(
+        file_list, key=lambda x: name_list[file_list.index(x)].lower())
     name_list = sorted(name_list, key=lambda x: x.lower())
 
     source_list = name_list + [""]
@@ -353,7 +447,18 @@ def get_lists():
         if a.startswith("SD"):
             source_list += ["NEW " + a]
 
+
 def find_source(source):
+    """
+    Find the file path of a model given its name. The name must be present 
+    in the global list of source names. If the file does not exist, returns None.
+
+    Args:
+    source (str): The name of the model.
+
+    Returns:
+    str or None: The absolute path to the model file, or None if the file does not exist.
+    """
     if not source:
         return None
     index = source_list.index(source)
@@ -363,14 +468,28 @@ def find_source(source):
         return None
     return file_list[index]
 
+
 def get_name(tm: ToolkitModel, arch):
+    """
+    Create a filename for a model based on its original name and analysis 
+    results. The new name includes model metrics and may include a special 
+    extension depending on the model architecture.
+
+    Args:
+    tm (ToolkitModel): A ToolkitModel object containing the analysis results 
+                       for the model.
+    arch (str): The architecture of the model.
+
+    Returns:
+    str: The generated filename.
+    """
     name = "model"
     if tm.filename:
         name = os.path.basename(tm.filename).rsplit(".", 1)[0]
 
     if tm.m_str:
         if "SD" in arch:
-            name += "-" + tm.m_str.replace("/","-")
+            name += "-" + tm.m_str.replace("/", "-")
         else:
             m = tm.m_str.split("/")
             if "UNET" in arch:
@@ -386,7 +505,18 @@ def get_name(tm: ToolkitModel, arch):
         name += ".safetensors"
     return name
 
+
 def do_load(source, precision):
+    """
+    Loads the model given the source and precision.
+
+    Args:
+        source (str): The path or identifier to the model file to be loaded.
+        precision (str): The precision setting for the model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     global loaded
 
     basic_report, adv_report, save_name, error = "", "", "", ""
@@ -413,7 +543,8 @@ def do_load(source, precision):
             error = f"Cannot find {source}!"
         else:
             model, _ = load(filename)
-            renamed, broken = fix_model(model, fix_clip=shared.opts.model_toolkit_fix_clip)
+            renamed, broken = fix_model(
+                model, fix_clip=shared.opts.model_toolkit_fix_clip)
             loaded = do_analysis(model)
             loaded.renamed = renamed
             loaded.broken = broken
@@ -426,7 +557,6 @@ def do_load(source, precision):
 
     if error:
         error = f"### ERROR: {error}\n----"
-
 
     reports = [gr.update(value=basic_report), gr.update(value=adv_report)]
     sources = [gr.update(), gr.update()]
@@ -442,13 +572,26 @@ def do_load(source, precision):
         drop_class_list = sorted(loaded.a_found[loaded.a_type].keys())
         drops += [gr.update(choices=drop_class_list, value=drop_class_list[0])]
 
-        drop_comp_list = ["auto"] + sorted(loaded.a_found[loaded.a_type][drop_class_list[0]])
+        drop_comp_list = ["auto"] + \
+            sorted(loaded.a_found[loaded.a_type][drop_class_list[0]])
         drops += [gr.update(choices=drop_comp_list, value="auto")]
 
     updates = reports + sources + drops + rows + names + error
     return updates
 
+
 def do_select(drop_arch, drop_class, drop_comp):
+    """
+    Selects specific architecture, class and component of the model.
+
+    Args:
+        drop_arch (str): The architecture of the model to be selected.
+        drop_class (str): The class of the model to be selected.
+        drop_comp (str): The component of the model to be selected.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     global loaded
     if not loaded:
         return [gr.update(choices=[], value="") for _ in range(3)] + [gr.update(value="")]
@@ -480,7 +623,14 @@ def do_select(drop_arch, drop_class, drop_comp):
 
     return updates
 
+
 def do_clear():
+    """
+    Clears the currently loaded model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     global loaded
     loaded = None
 
@@ -494,11 +644,28 @@ def do_clear():
     updates = reports + sources + drops + rows + names + error
     return updates
 
+
 def do_refresh():
+    """
+    Refreshes the source list and name list of the models.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     get_lists()
     return [gr.update(choices=source_list, value=source_list[0]), gr.update(choices=name_list, value=name_list[0])]
 
+
 def do_report(precision):
+    """
+    Generates a basic and advanced report for the loaded model based on precision.
+
+    Args:
+        precision (str): The precision setting for the model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     dont_half = "FP32" in precision
     keep_ema = False
 
@@ -510,7 +677,18 @@ def do_report(precision):
 
     return [gr.update(value=v) for v in values]
 
+
 def do_save(save_name, precision):
+    """
+    Saves the currently loaded model with the given save name and precision.
+
+    Args:
+        save_name (str): The name to save the model as.
+        precision (str): The precision setting for the model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     dont_half = "FP32" in precision
     keep_ema = False
 
@@ -530,7 +708,7 @@ def do_save(save_name, precision):
     if model:
         save(model, METADATA, filename)
     else:
-        error = f"### ERROR: Model is empty!\n----"
+        error = "### ERROR: Model is empty!\n----"
     del model
 
     reports = [gr.update(), gr.update()]
@@ -543,12 +721,26 @@ def do_save(save_name, precision):
     updates = reports + sources + drops + rows + names + error
     return updates
 
+
 def do_export(drop_arch, drop_class, drop_comp, export_name, precision):
+    """
+    Exports a specific architecture, class and component of the model with given export name and precision.
+
+    Args:
+        drop_arch (str): The architecture of the model to be exported.
+        drop_class (str): The class of the model to be exported.
+        drop_comp (str): The component of the model to be exported.
+        export_name (str): The name to export the model as.
+        precision (str): The precision setting for the model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     dont_half = "FP32" in precision
     error = ""
 
     if not loaded or not loaded.model:
-        error = f"### ERROR: Model is empty!\n----"
+        error = "### ERROR: Model is empty!\n----"
     else:
         comp = drop_comp
 
@@ -584,12 +776,26 @@ def do_export(drop_arch, drop_class, drop_comp, export_name, precision):
             save(model, {}, filename)
         else:
             error = f"### ERROR: Model doesnt contain a {drop_class}!\n----"
-            pass
 
-    updates = [gr.update() for _ in range(4)] + [gr.update(value=error), gr.update(visible=not not error)]
+    updates = [gr.update() for _ in range(4)] + \
+        [gr.update(value=error), gr.update(visible=not not error)]
     return updates
 
+
 def do_import(drop_arch, drop_class, drop_comp, import_drop, precision):
+    """
+    Imports a specific architecture, class and component of the model from a specified source.
+
+    Args:
+        drop_arch (str): The architecture of the model to be imported.
+        drop_class (str): The class of the model to be imported.
+        drop_comp (str): The component of the model to be imported.
+        import_drop (str): The source of the model to be imported.
+        precision (str): The precision setting for the model.
+
+    Returns:
+        list: A list of updates for the front-end.
+    """
     global loaded
     error = ""
 
@@ -663,7 +869,20 @@ def do_import(drop_arch, drop_class, drop_comp, import_drop, precision):
     updates = reports + sources + drops + rows + names + error
     return updates
 
+
 def on_ui_tabs():
+    """
+    This method constructs the UI tabs for the model toolkit.
+
+    This function defines the user interface of the model toolkit, providing tabs for 
+    different functionalities, such as Basic and Advanced functionalities. It includes 
+    controls for loading, saving, clearing and refreshing models. It also enables 
+    importing and exporting components, as well as selecting and working with 
+    different architectural components.
+
+    It dynamically generates the UI elements, including dropdowns, buttons, and textboxes, 
+    and binds them with respective functions for handling user interactions.
+    """
     get_lists()
     css = """
         .float-text { float: left; } .float-text-p { float: left; line-height: 2.5rem; } #mediumbutton { max-width: 32rem; } #smalldropdown { max-width: 2rem; } #smallbutton { max-width: 2rem; }
@@ -675,15 +894,19 @@ def on_ui_tabs():
     with gr.Blocks(css=css, analytics_enabled=False, variant="compact") as checkpoint_toolkit:
         gr.HTML(value=f"<style>{css}</style>")
         with gr.Row() as load_row:
-            source_dropdown = gr.Dropdown(label="Source", choices=source_list, value=source_list[0], interactive=True)
+            source_dropdown = gr.Dropdown(
+                label="Source", choices=source_list, value=source_list[0], interactive=True)
             load_button = gr.Button(value='Load', variant="primary")
-            load_refresh_button = gr.Button(elem_id="smallbutton", value="Refresh")
+            load_refresh_button = gr.Button(
+                elem_id="smallbutton", value="Refresh")
         with gr.Row(visible=False) as save_row:
             save_name = gr.Textbox(label="Name", interactive=True)
-            prec_dropdown = gr.Dropdown(elem_id="smalldropdown", label="Precision", choices=["FP16", "FP32"], value="FP16", interactive=True)
+            prec_dropdown = gr.Dropdown(elem_id="smalldropdown", label="Precision", choices=[
+                                        "FP16", "FP32"], value="FP16", interactive=True)
             save_button = gr.Button(value='Save', variant="primary")
             clear_button = gr.Button(elem_id="smallbutton", value="Clear")
-            save_refresh_button = gr.Button(elem_id="smallbutton", value="Refresh")
+            save_refresh_button = gr.Button(
+                elem_id="smallbutton", value="Refresh")
         with gr.Row(visible=False) as error_row:
             error_md = gr.Markdown(elem_id="errormd", value="")
         with gr.Tab("Basic"):
@@ -693,15 +916,22 @@ def on_ui_tabs():
             with gr.Column(variant="panel"):
                 gr.HTML(value='<h1 class="gr-button-lg float-text">Component</h1><p class="float-text-p"><i>Select a component class or specific component.</i></p>')
                 with gr.Row():
-                    arch_dropdown = gr.Dropdown(label="Architecture", choices=[], interactive=True)
-                    class_dropdown = gr.Dropdown(label="Class", choices=[], interactive=True)
-                    comp_dropdown = gr.Dropdown(label="Component", choices=[], interactive=True)
-                gr.HTML(value='<h1 class="gr-button-lg float-text">Action</h1><p class="float-text-p"><i>Replace or save the selected component.</i></p>')
+                    arch_dropdown = gr.Dropdown(
+                        label="Architecture", choices=[], interactive=True)
+                    class_dropdown = gr.Dropdown(
+                        label="Class", choices=[], interactive=True)
+                    comp_dropdown = gr.Dropdown(
+                        label="Component", choices=[], interactive=True)
+                gr.HTML(
+                    value='<h1 class="gr-button-lg float-text">Action</h1><p class="float-text-p"><i>Replace or save the selected component.</i></p>')
                 with gr.Row():
-                    import_dropdown = gr.Dropdown(label="File", choices=name_list, value=name_list[0], interactive=True)
-                    import_button = gr.Button(elem_id="smallbutton", value='Import')
+                    import_dropdown = gr.Dropdown(
+                        label="File", choices=name_list, value=name_list[0], interactive=True)
+                    import_button = gr.Button(
+                        elem_id="smallbutton", value='Import')
                     export_name = gr.Textbox(label="Name", interactive=True)
-                    export_button = gr.Button(elem_id="smallbutton", value='Export')
+                    export_button = gr.Button(
+                        elem_id="smallbutton", value='Export')
             with gr.Row(variant="compact"):
                 adv_report_md = gr.Markdown(elem_id="reportmd", value="")
 
@@ -714,115 +944,49 @@ def on_ui_tabs():
 
         everything = reports + sources + drops + rows + names + error
 
-        load_button.click(fn=do_load, inputs=[source_dropdown, prec_dropdown], outputs=everything)
+        load_button.click(fn=do_load, inputs=[
+                          source_dropdown, prec_dropdown], outputs=everything)
         clear_button.click(fn=do_clear, inputs=[], outputs=everything)
-        load_refresh_button.click(fn=do_refresh, inputs=[], outputs=[source_dropdown, import_dropdown])
-        save_refresh_button.click(fn=do_refresh, inputs=[], outputs=[source_dropdown, import_dropdown])
-        prec_dropdown.change(fn=do_report, inputs=[prec_dropdown], outputs=reports)
-        arch_dropdown.change(fn=do_select, inputs=drops, outputs=drops + [export_name])
-        class_dropdown.change(fn=do_select, inputs=drops, outputs=drops + [export_name])
-        comp_dropdown.change(fn=do_select, inputs=drops, outputs=drops + [export_name])
-        save_button.click(fn=do_save, inputs=[save_name, prec_dropdown], outputs=everything)
+        load_refresh_button.click(fn=do_refresh, inputs=[], outputs=[
+                                  source_dropdown, import_dropdown])
+        save_refresh_button.click(fn=do_refresh, inputs=[], outputs=[
+                                  source_dropdown, import_dropdown])
+        prec_dropdown.change(fn=do_report, inputs=[
+                             prec_dropdown], outputs=reports)
+        arch_dropdown.change(fn=do_select, inputs=drops,
+                             outputs=drops + [export_name])
+        class_dropdown.change(fn=do_select, inputs=drops,
+                              outputs=drops + [export_name])
+        comp_dropdown.change(fn=do_select, inputs=drops,
+                             outputs=drops + [export_name])
+        save_button.click(fn=do_save, inputs=[
+                          save_name, prec_dropdown], outputs=everything)
 
-        export_button.click(fn=do_export, inputs=drops+[export_name, prec_dropdown], outputs=drops + [export_name] + error)
-        import_button.click(fn=do_import, inputs=drops+[import_dropdown, prec_dropdown], outputs=everything)
+        export_button.click(fn=do_export, inputs=drops +
+                            [export_name, prec_dropdown], outputs=drops + [export_name] + error)
+        import_button.click(fn=do_import, inputs=drops +
+                            [import_dropdown, prec_dropdown], outputs=everything)
 
     return (checkpoint_toolkit, "Toolkit", "checkpoint_toolkit"),
 
+
 def on_ui_settings():
+    """
+    This method configures the UI settings for the model toolkit.
+
+    This function sets up the options available in the settings of the model toolkit. 
+    Currently, it allows the user to toggle whether to fix broken CLIP position IDs and 
+    whether to enable Autopruning.
+    """
     section = ('model-toolkit', "Model Toolkit")
-    shared.opts.add_option("model_toolkit_fix_clip", shared.OptionInfo(False, "Fix broken CLIP position IDs", section=section))
-    shared.opts.add_option("model_toolkit_autoprune", shared.OptionInfo(False, "Enable Autopruning", section=section))
+    shared.opts.add_option("model_toolkit_fix_clip", shared.OptionInfo(
+        False, "Fix broken CLIP position IDs", section=section))
+    shared.opts.add_option("model_toolkit_autoprune", shared.OptionInfo(
+        False, "Enable Autopruning", section=section))
 
-
-def autoprune_move(in_file, out_folder):
-    name = in_file.rsplit(os.path.sep, 1)[1]
-    name, ext = name.rsplit(".", 1)
-
-    out_file = os.path.join(out_folder, f"{name}.{ext}")
-    i = 1
-    while os.path.exists(out_file):
-        out_file = os.path.join(out_folder, f"{name}({i}).{ext}")
-        i += 1
-
-    os.makedirs(out_folder, exist_ok=True)
-    shutil.move(in_file, out_file)
-
-def autoprune_delete(in_file):
-    for _ in range(100):
-        try:
-            os.remove(in_file)
-        except Exception:
-            time.sleep(0.05)
-            continue
-        break
-    else:
-        print("\tCOULD NOT REMOVE")
-
-def autoprune_get_models(dir):
-    ext = ["*" + e for e in MODEL_EXT]
-    files = []
-    for e in ext:
-        for file in glob.glob(dir + os.sep + e):
-            files += [os.path.abspath(file)]
-    return files
-
-def autoprune(in_folder):
-    time.sleep(5)
-    for in_file in autoprune_get_models(in_folder):
-        name = in_file.rsplit(os.path.sep, 1)[1]
-        print("PRUNING", name)
-        try:
-            model, _ = load(in_file)
-        except Exception:
-            print("\tFAILED: MODEL NOT INTACT")
-            continue
-        fix_model(model, fix_clip=shared.opts.model_toolkit_fix_clip)
-        found = inspect_model(model)
-
-        if not found:
-            print("\tFAILED: UNKNOWN ARCHITECTURE")
-            print("\tMOVING TO Failed")
-            autoprune_move(in_file, AUTOPRUNE_FAILED_PATH)
-            continue
-
-        arch = list(found.keys())[0]
-        print("\tDETECTED AS", arch)
-        if "BROKEN" in arch:
-            print("\tFAILED: BROKEN ARCHITECTURE")
-            print("\tMOVING TO Failed")
-            autoprune_move(in_file, AUTOPRUNE_FAILED_PATH)
-            continue
-
-        prune_model(model, found, False, False)
-
-        ext = "safetensors"
-        if arch.startswith("SD"):
-            out_folder = MODEL_SAVE_PATH
-        elif arch.startswith("VAE"):
-            out_folder = VAE_SAVE_PATH
-            ext = "pt"
-        else:
-            out_folder = COMPONENT_SAVE_PATH
-
-        name = name.rsplit(".", 1)[0]
-        out_file = os.path.join(out_folder, f"{name}.{ext}")
-        i = 1
-        while os.path.exists(out_file):
-            out_file = os.path.join(out_folder, f"{name}({i}).{ext}")
-            i += 1
-
-        print("\tMOVING TO", out_file)
-        autoprune_delete(in_file)
-        save(model, {}, out_file)
-        print("\tDONE")
 
 script_callbacks.on_ui_settings(on_ui_settings)
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
 
 load_components(os.path.join(sys.path[0], "components"))
-
-if hasattr(shared.opts, "model_toolkit_autoprune") and shared.opts.model_toolkit_autoprune:
-    autoprune_thread = Thread(target=autoprune, args=[AUTOPRUNE_PATH])
-    autoprune_thread.start()

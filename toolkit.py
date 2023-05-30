@@ -4,359 +4,54 @@ import safetensors.torch
 import os
 import copy
 
-EMA_PREFIX = "model_ema."
+from constants import ARCHITECTURES, COMPONENTS, COMPONENT_CLASS, EMA_PREFIX
 
-METADATA = {'epoch': 0, 'global_step': 0, 'pytorch-lightning_version': '1.6.0'}
-
-IDENTIFICATION = {
-    "VAE": {
-        "SD-v1": 0,
-        "SD-v2": 869,
-        "NAI": 2982,
-        "WD-VAE-v1": 155,
-        "WD-VAE-v2": 41
-    },
-    "CLIP-v1": {
-        "SD-v1": 0,
-    },
-    "CLIP-v2": {
-        "SD-v2": 1141,
-        "WD-v1-4": 2543
-    }
-}
-
-COMPONENTS = {
-    "UNET-v1-SD": {
-        "keys": {},
-        "source": "UNET-v1-SD.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "UNET-v1-EMA": {
-        "keys": {},
-        "source": "UNET-v1-EMA.txt",
-        "prefix": "model_ema.diffusion_model"
-    },
-    "UNET-v1-Inpainting": {
-        "keys": {},
-        "source": "UNET-v1-Inpainting.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "UNET-v1-Pix2Pix": {
-        "keys": {},
-        "source": "UNET-v1-Pix2Pix.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "UNET-v1-Pix2Pix-EMA": {
-        "keys": {},
-        "source": "UNET-v1-Pix2Pix-EMA.txt",
-        "prefix": "model_ema.diffusion_model"
-    },
-    "UNET-v2-SD": {
-        "keys": {},
-        "source": "UNET-v2-SD.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "UNET-v2-Inpainting": {
-        "keys": {},
-        "source": "UNET-v2-Inpainting.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "UNET-v2-Depth": {
-        "keys": {},
-        "source": "UNET-v2-Depth.txt",
-        "prefix": "model.diffusion_model."
-    },
-    "VAE-v1-SD": {
-        "keys": {},
-        "source": "VAE-v1-SD.txt",
-        "prefix": "first_stage_model."
-    },
-    "CLIP-v1-SD": {
-        "keys": {},
-        "source": "CLIP-v1-SD.txt",
-        "prefix": "cond_stage_model.transformer.text_model."
-    },
-    "CLIP-v1-NAI": {
-        "keys": {},
-        "source": "CLIP-v1-SD.txt",
-        "prefix": "cond_stage_model.transformer."
-    },
-    "CLIP-v2-SD": {
-        "keys": {},
-        "source": "CLIP-v2-SD.txt",
-        "prefix": "cond_stage_model.model."
-    },
-    "CLIP-v2-WD": {
-        "keys": {},
-        "source": "CLIP-v2-WD.txt",
-        "prefix": "cond_stage_model.model."
-    },
-    "Depth-v2-SD": {
-        "keys": {},
-        "source": "Depth-v2-SD.txt",
-        "prefix": "depth_model.model."
-    },
-    "LoRA-v1-CLIP": {
-        "keys": {},
-        "shapes": {},
-        "source": "LoRA-v1-CLIP.txt",
-        "prefix": ""
-    },
-    "LoRA-v1A-CLIP": {
-        "keys": {},
-        "shapes": {},
-        "source": "LoRA-v1A-CLIP.txt",
-        "prefix": ""
-    },
-    "LoRA-v1-UNET": {
-        "keys": {},
-        "shapes": {},
-        "source": "LoRA-v1-UNET.txt",
-        "prefix": ""
-    },
-    "LoRA-v1A-UNET": {
-        "keys": {},
-        "shapes": {},
-        "source": "LoRA-v1A-UNET.txt",
-        "prefix": ""
-    },
-    "ControlNet-v1-SD": {
-        "keys": {},
-        "shapes": {},
-        "source": "ControlNet-v1-SD.txt",
-        "prefix": "control_model."
-    },
-}
-
-COMPONENT_CLASS = {
-    "UNET-v1-SD": "UNET-v1",
-    "UNET-v1-EMA": "EMA-UNET-v1",
-    "UNET-v1-Inpainting": "UNET-v1",
-    "UNET-v1-Pix2Pix": "UNET-v1-Pix2Pix",
-    "UNET-v1-Pix2Pix-EMA": "EMA-UNET-v1-Pix2Pix",
-    "UNET-v2-SD": "UNET-v2",
-    "UNET-v2-Inpainting": "UNET-v2",
-    "UNET-v2-Depth": "UNET-v2-Depth",
-    "VAE-v1-SD": "VAE-v1",
-    "CLIP-v1-SD": "CLIP-v1",
-    "CLIP-v1-NAI": "CLIP-v1",
-    "CLIP-v2-SD": "CLIP-v2",
-    "CLIP-v2-WD": "CLIP-v2",
-    "Depth-v2-SD": "Depth-v2",
-    "LoRA-v1-UNET": "LoRA-v1-UNET",
-    "LoRA-v1-CLIP": "LoRA-v1-CLIP",
-    "LoRA-v1A-UNET": "LoRA-v1-UNET",
-    "LoRA-v1A-CLIP": "LoRA-v1-CLIP",
-    "ControlNet-v1-SD": "ControlNet-v1",
-}
-
-OPTIONAL = [
-    ("alphas_cumprod", (1000,)),
-    ("alphas_cumprod_prev", (1000,)),
-    ("betas", (1000,)),
-    ("log_one_minus_alphas_cumprod", (1000,)),
-    ("model_ema.decay", ()),
-    ("model_ema.num_updates", ()),
-    ("posterior_log_variance_clipped", (1000,)),
-    ("posterior_mean_coef1", (1000,)),
-    ("posterior_mean_coef2", (1000,)),
-    ("posterior_variance", (1000,)),
-    ("sqrt_alphas_cumprod", (1000,)),
-    ("sqrt_one_minus_alphas_cumprod", (1000,)),
-    ("sqrt_recip_alphas_cumprod", (1000,)),
-    ("sqrt_recipm1_alphas_cumprod", (1000,)),
-    ("logvar", (1000,)),
-]
-
-ARCHITECTURES = {
-    "UNET-v1": {
-        "classes": ["UNET-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "UNET-v1-Pix2Pix": {
-        "classes": ["UNET-v1-Pix2Pix"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "UNET-v2": {
-        "classes": ["UNET-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "UNET-v2-Depth": {
-        "classes": ["UNET-v2-Depth"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "VAE-v1": {
-        "classes": ["VAE-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "CLIP-v1": {
-        "classes": ["CLIP-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "CLIP-v2": {
-        "classes": ["CLIP-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "Depth-v2": {
-        "classes": ["Depth-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "ControlNet-v1": {
-        "classes": ["ControlNet-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": False
-    },
-    "SD-v1": {
-        "classes": ["UNET-v1", "VAE-v1", "CLIP-v1"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "SD-v1-Pix2Pix": {
-        "classes": ["UNET-v1-Pix2Pix", "VAE-v1", "CLIP-v1"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "SD-v1-ControlNet": {
-        "classes": ["UNET-v1", "VAE-v1", "CLIP-v1", "ControlNet-v1"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "SD-v2": {
-        "classes": ["UNET-v2", "VAE-v1", "CLIP-v2"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "SD-v2-Depth": {
-        "classes": ["UNET-v2-Depth", "VAE-v1", "CLIP-v2", "Depth-v2"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "EMA-v1": {
-        "classes": ["EMA-UNET-v1"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    "EMA-v1-Pix2Pix": {
-        "classes": ["EMA-UNET-v1-Pix2Pix"],
-        "optional": OPTIONAL,
-        "required": [],
-        "prefixed": True
-    },
-    # standalone component architectures, for detecting broken models
-    "UNET-v1-BROKEN": {
-        "classes": ["UNET-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "UNET-v1-Pix2Pix-BROKEN": {
-        "classes": ["UNET-v1-Pix2Pix"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "UNET-v2-BROKEN": {
-        "classes": ["UNET-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "UNET-v2-Depth-BROKEN": {
-        "classes": ["UNET-v2-Depth"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "VAE-v1-BROKEN": {
-        "classes": ["VAE-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "CLIP-v1-BROKEN": {
-        "classes": ["CLIP-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "CLIP-v2-BROKEN": {
-        "classes": ["CLIP-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "Depth-v2-BROKEN": {
-        "classes": ["Depth-v2"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "ControlNet-v1-BROKEN": {
-        "classes": ["ControlNet-v1"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "LoRA-v1-UNET": {
-        "classes": ["LoRA-v1-UNET"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "LoRA-v1-CLIP": {
-        "classes": ["LoRA-v1-CLIP"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-    "LoRA-v1": {
-        "classes": ["LoRA-v1-CLIP", "LoRA-v1-UNET"],
-        "optional": [],
-        "required": [],
-        "prefixed": True
-    },
-}
 
 def tensor_size(t):
+    """
+    Get the size of the tensor in bytes.
+    
+    Args:
+    t (torch.Tensor): Tensor for which to compute size.
+    
+    Returns:
+    int: Size of tensor in bytes. Returns 0 if input is not a tensor.
+    """
     if type(t) == torch.Tensor:
         return t.nelement() * t.element_size()
     return 0
 
+
 def tensor_shape(key, data):
+    """
+    Determine the shape of tensor data. If the key is in a predefined list of keys, the shape may be altered.
+
+    Args:
+    key (str): Identifier for the tensor.
+    data: Tensor data.
+
+    Returns:
+    tuple: The tensor shape.
+    """
     if hasattr(data, 'shape'):
         shape = tuple(data.shape)
         for c in ["LoRA-v1-UNET", "LoRA-v1-CLIP"]:
             if key in COMPONENTS[c]['shapes']:
                 lora_shape = COMPONENTS[c]['shapes'][key]
                 if len(shape) == len(lora_shape):
-                    shape = tuple(a if b != -1 else b for a, b in zip(shape, lora_shape))
+                    shape = tuple(a if b != -1 else b for a,
+                                  b in zip(shape, lora_shape))
         return shape
     return tuple()
 
+
 def load_components(path):
+    """
+    Load component definitions from a specified path.
+
+    Args:
+    path (str): Path to the directory containing component definition files.
+    """
     for c in COMPONENTS:
         file = os.path.join(path, COMPONENTS[c]["source"])
         if not os.path.exists(file):
@@ -371,33 +66,80 @@ def load_components(path):
                     z = tuple()
                 else:
                     z = tuple(int(i) for i in z)
-                COMPONENTS[c]["keys"].add((k,z))
+                COMPONENTS[c]["keys"].add((k, z))
                 if "shapes" in COMPONENTS[c]:
                     COMPONENTS[c]["shapes"][k] = z
 
+
 def get_prefixed_keys(component):
+    """
+    Retrieve a set of keys from a component, with each key being prefixed.
+
+    Args:
+    component (str): Identifier of the component from which to retrieve keys.
+    
+    Returns:
+    set: A set of keys, each being prefixed.
+    """
     prefix = COMPONENTS[component]["prefix"]
     allowed = COMPONENTS[component]["keys"]
     return set([(prefix + k, z) for k, z in allowed])
 
+
 def get_keys_size(model, keys):
+    """
+    Computes the total size in bytes of the specified keys in a model.
+
+    Args:
+    model (dict): A dictionary representing the model.
+    keys (list): List of keys to calculate their total size.
+
+    Returns:
+    int: Total size of the specified keys in the model.
+    """
     z = 0
     for k in keys:
         if k in model:
             z += tensor_size(model[k])
     return z
 
+
 class FakeTensor():
+    """
+    A mock tensor class, providing a simplified stand-in for PyTorch tensor objects.
+    """
     def __init__(self, shape):
         self.shape = shape
 
+
 def build_fake_model(model):
+    """
+    Constructs a fake model using the input model's keys and the shapes of its tensors.
+
+    Args:
+    model (dict): A dictionary representing the model.
+
+    Returns:
+    dict: A dictionary representing the fake model, containing the same keys as the input model and FakeTensor objects as values.
+    """
     fake_model = {}
     for k in model:
         fake_model[k] = FakeTensor(tensor_shape(k, model[k]))
     return fake_model
 
+
 def inspect_model(model, all=False):
+    """
+    Inspects a model's architecture, identifying its components and any issues.
+
+    Args:
+    model (dict): The model to be inspected.
+    all (bool, optional): If True, the function returns both found and rejected components.
+
+    Returns:
+    dict: Information about the model's architecture.
+    """
+    
     # find all arch's and components in the model
     # also reasons for failing to find them
 
@@ -405,8 +147,8 @@ def inspect_model(model, all=False):
 
     rejected = {}
 
-    components = [] # comp -> prefixed
-    classes = {} # class -> [comp]
+    components = []  # comp -> prefixed
+    classes = {}  # class -> [comp]
     for comp in COMPONENTS:
         required_keys_unprefixed = COMPONENTS[comp]["keys"]
         required_keys_prefixed = get_prefixed_keys(comp)
@@ -420,17 +162,17 @@ def inspect_model(model, all=False):
 
         if missing_prefixed and missing_unprefixed:
             if missing_prefixed != required_keys_prefixed:
-                rejected[comp] = rejected.get(comp, []) + [{"reason": f"Missing required keys ({len(missing_prefixed)} of {len(required_keys_prefixed)})", "data": list(missing_prefixed)}]
-            
+                rejected[comp] = rejected.get(
+                    comp, []) + [{"reason": f"Missing required keys ({len(missing_prefixed)} of {len(required_keys_prefixed)})", "data": list(missing_prefixed)}]
+
             if missing_unprefixed != required_keys_unprefixed:
-                rejected[comp] = rejected.get(comp, []) + [{"reason": f"Missing required keys ({len(missing_unprefixed)} of {len(required_keys_unprefixed)})", "data": list(missing_unprefixed)}]
+                rejected[comp] = rejected.get(
+                    comp, []) + [{"reason": f"Missing required keys ({len(missing_unprefixed)} of {len(required_keys_unprefixed)})", "data": list(missing_unprefixed)}]
         else:
             clss = COMPONENT_CLASS[comp]
             classes[clss] = [comp] + classes.get(clss, [])
-    
-    
 
-    found = {} # arch -> {class -> [comp]}
+    found = {}  # arch -> {class -> [comp]}
     for arch in ARCHITECTURES:
         needs_prefix = ARCHITECTURES[arch]["prefixed"]
         required_classes = set(ARCHITECTURES[arch]["classes"])
@@ -439,25 +181,28 @@ def inspect_model(model, all=False):
         if not required_keys.issubset(keys):
             missing = required_keys.difference(keys)
             if missing != required_keys:
-                rejected[arch] = rejected.get(arch, []) + [{"reason": f"Missing required keys ({len(missing)} of {len(required_keys)})", "data": list(missing)}]
+                rejected[arch] = rejected.get(
+                    arch, []) + [{"reason": f"Missing required keys ({len(missing)} of {len(required_keys)})", "data": list(missing)}]
             continue
 
         found_classes = {}
         for clss in required_classes:
             if clss in classes:
                 for comp in classes[clss]:
-                    
-                    if (comp, needs_prefix) in components:# or ((comp, not needs_prefix) in components and not needs_prefix):
+
+                    # or ((comp, not needs_prefix) in components and not needs_prefix):
+                    if (comp, needs_prefix) in components:
                         found_classes[clss] = found_classes.get(clss, [])
                         found_classes[clss] += [comp]
-                    #else:
+                    # else:
                     #    rejected[arch] = rejected.get(arch, []) + [{"reason": "Class has incorrect prefix", "data": [clss]}]
 
         found_class_names = set(found_classes.keys())
         if not required_classes.issubset(found_class_names):
             if found_class_names:
                 missing = list(required_classes.difference(found_class_names))
-                rejected[arch] = rejected.get(arch, []) + [{"reason": "Missing required classes", "data": missing}]
+                rejected[arch] = rejected.get(
+                    arch, []) + [{"reason": "Missing required classes", "data": missing}]
             continue
 
         found[arch] = found_classes
@@ -467,13 +212,14 @@ def inspect_model(model, all=False):
         for a in list(found.keys()):
             if a.endswith("-BROKEN"):
                 del found[a]
-    
+
     for arch in list(found.keys()):
         if "LoRA" in arch:
             for clss in found[arch]:
                 if len(found[arch][clss]) == 2:
-                    found[arch][clss] = [found[arch][clss][0].replace("-v1-", "-v1A-")]
-    
+                    found[arch][clss] = [found[arch][clss]
+                                         [0].replace("-v1-", "-v1A-")]
+
     if "LoRA-v1" in found:
         del found["LoRA-v1-UNET"]
         del found["LoRA-v1-CLIP"]
@@ -483,7 +229,17 @@ def inspect_model(model, all=False):
     else:
         return resolve_arch(found)
 
+
 def resolve_class(components):
+    """
+    Resolves a list of components down to a single component, if necessary.
+
+    Args:
+    components (list): A list of components to be resolved.
+
+    Returns:
+    list: A list containing either the single resolved component, or the original list of components.
+    """
     components = list(components)
 
     if not components or len(components) == 1:
@@ -495,11 +251,22 @@ def resolve_class(components):
         return [sd_components[0]]
 
     # otherwise component with the most keys is probably the best
-    components = sorted(components, key=lambda c: len(COMPONENTS[c]["keys"]), reverse=True)
+    components = sorted(components, key=lambda c: len(
+        COMPONENTS[c]["keys"]), reverse=True)
 
     return [components[0]]
 
+
 def resolve_arch(arch):
+    """
+    Resolves potentially many overlapping architectures to a single one.
+
+    Args:
+    arch (dict): Dictionary of architectures to be resolved.
+
+    Returns:
+    dict: Dictionary with a single architecture after resolution.
+    """
     arch = copy.deepcopy(arch)
     # resolve potentially many overlapping arch's to a single one
 
@@ -522,18 +289,41 @@ def resolve_arch(arch):
         choosen = max(arch_sizes, key=arch_sizes.get)
     return {choosen: arch[choosen]}
 
+
 def find_components(arch, component_class):
+    """
+    Find components of a specific class within a model architecture.
+
+    Args:
+    arch (dict): The architecture of the model.
+    component_class (str): The class of components to find.
+
+    Returns:
+    set: The set of components of the specified class in the architecture.
+    """
     components = set()
     for a in arch:
         if component_class in arch[a]:
             components.update(arch[a][component_class])
     return components
 
-def contains_component(model, component, prefixed = None):
+
+def contains_component(model, component, prefixed=None):
+    """
+    Checks whether a model contains a specific component.
+
+    Args:
+    model (dict): The model to be checked.
+    component (str): The component to look for in the model.
+    prefixed (bool, optional): Specifies whether to look for the component name as a prefix.
+
+    Returns:
+    bool: True if the model contains the component, False otherwise.
+    """
     model_keys = set([(k, tensor_shape(k, model[k])) for k in model])
 
     allowed = False
-    if prefixed == None: #prefixed or unprefixed
+    if prefixed == None:  # prefixed or unprefixed
         allowed = get_prefixed_keys(component).issubset(model_keys)
         allowed = allowed or COMPONENTS[component]["keys"].issubset(model_keys)
     elif prefixed == True:
@@ -543,7 +333,19 @@ def contains_component(model, component, prefixed = None):
 
     return allowed
 
+
 def get_allowed_keys(arch, allowed_classes=None):
+    """
+    Determines the allowed keys for a given architecture.
+    
+    Args:
+        arch (dict): A dictionary representing the architecture to be analyzed.
+        allowed_classes (list, optional): A list of classes that are permitted. If None, all classes are allowed.
+        
+    Returns:
+        set: A set of keys that are allowed within the architecture.
+    """
+    
     # get all allowed keys
     allowed = set()
     for a in arch:
@@ -560,8 +362,21 @@ def get_allowed_keys(arch, allowed_classes=None):
                     allowed.update(comp_keys)
     return allowed
 
+
 def fix_model(model, fix_clip=False):
+    """
+    Fixes certain keys in the provided model dictionary.
+    
+    Args:
+        model (dict): A dictionary representing the model.
+        fix_clip (bool, optional): If True, fix the ids for the clip model. Default is False.
+        
+    Returns:
+        tuple: A tuple containing lists of renamed keys and broken keys in the model.
+    """
+    
     # fix NAI nonsense
+    
     nai_keys = {
         'cond_stage_model.transformer.embeddings.': 'cond_stage_model.transformer.text_model.embeddings.',
         'cond_stage_model.transformer.encoder.': 'cond_stage_model.transformer.text_model.encoder.',
@@ -572,11 +387,11 @@ def fix_model(model, fix_clip=False):
         for r in nai_keys:
             if type(k) == str and k.startswith(r):
                 kk = k.replace(r, nai_keys[r])
-                renamed += [(k,kk)]
+                renamed += [(k, kk)]
                 model[kk] = model[k]
                 del model[k]
                 break
-    
+
     # fix merging nonsense
     i = "cond_stage_model.transformer.text_model.embeddings.position_ids"
     broken = []
@@ -596,7 +411,18 @@ def fix_model(model, fix_clip=False):
 
     return renamed, broken
 
+
 def fix_ema(model):
+    """
+    Converts a UNET-v1-EMA model into a UNET-v1-SD model, but only when in component form (unprefixed).
+    
+    Args:
+        model (dict): A dictionary representing the model.
+        
+    Returns:
+        None.
+    """
+    
     # turns UNET-v1-EMA into UNET-v1-SD
     # but only when in component form (unprefixed)
 
@@ -611,7 +437,19 @@ def fix_ema(model):
             model[k] = model[kk]
             del model[kk]
 
+
 def compute_metric(model, arch=None):
+    """
+    Computes a metric score for a given model based on the architecture.
+    
+    Args:
+        model (dict): A dictionary representing the model.
+        arch (dict, optional): A dictionary representing the architecture. If None, the architecture will be inspected from the model.
+        
+    Returns:
+        tuple: A tuple containing the metric as a string and a tuple of individual scores for unet, vae and clip respectively.
+    """
+    
     def tensor_metric(t):
         t = t.to(torch.float16).to(torch.float32)
         return torch.sum(torch.sigmoid(t)-0.5)
@@ -619,7 +457,8 @@ def compute_metric(model, arch=None):
     if arch == None:
         arch = inspect_model(model)
 
-    unet_keys = get_allowed_keys(arch, ["UNET-v1", "UNET-v1-Pix2Pix", "UNET-v2", "UNET-v2-Depth"])
+    unet_keys = get_allowed_keys(
+        arch, ["UNET-v1", "UNET-v1-Pix2Pix", "UNET-v2", "UNET-v2-Depth"])
     vae_keys = get_allowed_keys(arch, ["VAE-v1"])
     clip_keys = get_allowed_keys(arch, ["CLIP-v1", "CLIP-v2"])
 
@@ -641,7 +480,8 @@ def compute_metric(model, arch=None):
             if "mlp." in k and not ".23." in k:
                 clip += tensor_metric(model[k])
 
-    b_unet, b_vae, b_clip = -6131.5400, 17870.7051, -2097.8596 if is_clip_v1 else -8757.5630
+    b_unet, b_vae, b_clip = -6131.5400, 17870.7051, - \
+        2097.8596 if is_clip_v1 else -8757.5630
     k_unet, k_vae, k_clip = 10000, 10000, 1000000 if is_clip_v1 else 10000
 
     r = 10000
@@ -652,7 +492,7 @@ def compute_metric(model, arch=None):
 
     while n_unet >= r:
         n_unet -= r//2
-    
+
     while n_vae >= r:
         n_vae -= r//2
 
@@ -666,10 +506,21 @@ def compute_metric(model, arch=None):
     n_unet = None if unet == 0 else n_unet
     n_vae = None if vae == 0 else n_vae
     n_clip = None if clip == 0 else n_clip
-    
+
     return s_unet+"/"+s_vae+"/"+s_clip, (n_unet, n_vae, n_clip)
 
+
 def load(file):
+    """
+    Loads a model and its metadata from a file.
+    
+    Args:
+        file (str): The file path from which the model will be loaded.
+        
+    Returns:
+        tuple: A tuple containing a dictionary of the model and a dictionary of the metadata.
+    """
+    
     model = {}
     metadata = {}
 
@@ -687,7 +538,20 @@ def load(file):
 
     return model, metadata
 
+
 def save(model, metadata, file):
+    """
+    Saves a model and its metadata to a file.
+    
+    Args:
+        model (dict): A dictionary representing the model to be saved.
+        metadata (dict): A dictionary containing the metadata of the model.
+        file (str): The file path where the model will be saved.
+        
+    Returns:
+        None.
+    """
+    
     if file.endswith(".safetensors"):
         safetensors.torch.save_file(model, file)
         return
@@ -696,7 +560,21 @@ def save(model, metadata, file):
         out['state_dict'] = model
         torch.save(out, file)
 
+
 def prune_model(model, arch, keep_ema, dont_half):
+    """
+    Prunes the model based on the allowed keys in the given architecture.
+    
+    Args:
+        model (dict): A dictionary representing the model to be pruned.
+        arch (dict): A dictionary representing the architecture of the model.
+        keep_ema (bool): If True, keeps the keys that start with EMA_PREFIX in the model.
+        dont_half (bool): If True, ensures that the model tensors are of float32 type. If False, converts the tensors to float16.
+        
+    Returns:
+        None.
+    """
+    
     allowed = get_allowed_keys(arch)
     for k in list(model.keys()):
         kk = (k, tensor_shape(k, model[k]))
@@ -714,7 +592,21 @@ def prune_model(model, arch, keep_ema, dont_half):
             if not dont_half and model[k].dtype in {torch.float32, torch.float64, torch.bfloat16}:
                 model[k] = model[k].to(torch.float16)
 
+
 def extract_component(model, component, prefixed=None):
+    """
+    Extracts a specific component from the model.
+
+    Args:
+        model (dict): A dictionary representing the model.
+        component (str): The component to extract from the model.
+        prefixed (bool, optional): Whether to consider only the keys that start with the component prefix. 
+            If None, both prefixed and non-prefixed keys are considered.
+
+    Returns:
+        None. The model is modified in-place.
+    """
+    
     prefix = COMPONENTS[component]["prefix"]
     allowed = set()
     if prefixed != True:
@@ -726,14 +618,31 @@ def extract_component(model, component, prefixed=None):
         z = tensor_shape(k, model[k])
         if (k, z) in allowed:
             if k.startswith(prefix):
-                kk = k.replace(prefix,"")
+                kk = k.replace(prefix, "")
                 if kk != k:
                     model[kk] = model[k]
                     del model[k]
         else:
             del model[k]
 
+
 def replace_component(target, target_arch, source, source_component):
+    """
+    Replaces a component of the target model with a component from the source model.
+
+    Args:
+        target (dict): A dictionary representing the target model.
+        target_arch (str): The architecture of the target model.
+        source (dict): A dictionary representing the source model.
+        source_component (str): The component from the source model to be copied to the target.
+
+    Raises:
+        ValueError: If the source_component is not in the target_arch architecture.
+
+    Returns:
+        None. The target model is modified in-place.
+    """
+    
     if not COMPONENT_CLASS[source_component] in ARCHITECTURES[target_arch]["classes"]:
         raise ValueError(f"{target_arch} cannot contain {source_component}!")
 
@@ -751,20 +660,46 @@ def replace_component(target, target_arch, source, source_component):
         if (src_k, src_z) in component_keys:
             target[dst_k] = source[k]
 
+
 def delete_class(model, model_arch, component_class):
+    """
+    Deletes a specific class of components from the model.
+
+    Args:
+        model (dict): A dictionary representing the model.
+        model_arch (str): The architecture of the model.
+        component_class (str): The class of components to delete from the model.
+
+    Returns:
+        None. The model is modified in-place.
+    """
+    
     keys = set([(k, tensor_shape(k, model[k])) for k in model])
     prefixed = ARCHITECTURES[model_arch]["prefixed"]
 
     for name, component in COMPONENTS.items():
         if COMPONENT_CLASS[name] != component_class:
             continue
-        component_keys = component["keys"] if not prefixed else get_prefixed_keys(name)
+        component_keys = component["keys"] if not prefixed else get_prefixed_keys(
+            name)
         for k in component_keys:
             if k in keys:
                 del model[k[0]]
                 keys.remove(k)
 
+
 def log(model, file):
+    """
+    Logs the keys and shapes of the tensors in the model to a file.
+
+    Args:
+        model (dict): A dictionary representing the model.
+        file (str): The file path where the log will be saved.
+
+    Returns:
+        None.
+    """
+    
     keys = []
     for k in model:
         size = str(list(model[k].shape))
@@ -773,6 +708,7 @@ def log(model, file):
     out = "\n".join(keys)
     with open(file, "w") as f:
         f.write(out)
+
 
 if __name__ == '__main__':
     load_components("components")
